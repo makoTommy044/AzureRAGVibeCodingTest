@@ -1,0 +1,156 @@
+---
+
+# ✅ 総評（安全性・構成・自動化の完成度）
+
+| 観点 | 評価 | コメント |
+|------|------|-----------|
+| API キーの秘匿 | ◎ | listKeys → SWA appsettings への注入は正しい |
+| フロントへのキー露出防止 | ◎ | 完全に防げている |
+| リソース構成 | ○ | RAG の最小構成として十分 |
+| セキュリティ | △ | OpenAI の Public Network Access が Enabled |
+| 運用性 | △ | Diagnostic Settings が未設定 |
+| 将来拡張性 | ○ | SWA + Functions 前提で良い |
+
+---
+
+# 🔒 セキュリティ観点の指摘（重要度順）
+
+## ① **OpenAI の publicNetworkAccess が Enabled（危険度：高）**
+```bicep
+properties: {
+  customSubDomainName: openaiName
+  publicNetworkAccess: 'Enabled'
+}
+```
+
+### 問題点
+- インターネットから誰でも API に到達できる
+- キーが漏れた場合、**即悪用される**
+
+### 推奨
+- `publicNetworkAccess: 'Disabled'`
+- SWA → Functions → OpenAI を **Managed Identity** で接続する構成に変更
+
+ただし、Managed Identity を使うには **Azure OpenAI の “Azure AD 認証”** が必要で、  
+まだ Preview のため、現状は以下が現実的です：
+
+**publicNetworkAccess: Enabled のまま、IP 制限をかける**
+
+```bicep
+properties: {
+  customSubDomainName: openaiName
+  publicNetworkAccess: 'Enabled'
+  networkAcls: {
+    defaultAction: 'Deny'
+    ipRules: [
+      { value: 'YOUR_SWA_OUTBOUND_IP' }
+    ]
+  }
+}
+```
+
+---
+
+## ② **SWA の appsettings に機密情報を入れている（安全だが注意点あり）**
+
+これは Azure の設計上 **問題ありません**。  
+SWA の appsettings は **サーバー側の環境変数**であり、  
+ブラウザからは絶対に見えません。
+
+ただし、以下は避けた方が良いです：
+
+- `STORAGE_ACCOUNT_NAME` を入れる → これは機密ではないが、将来 SAS を入れたくなると危険
+- `SEARCH_SERVICE_NAME` も同様
+
+**必要最小限の設定だけに絞る**のがベストです。
+
+---
+
+## ③ **Diagnostic Settings がない（運用上のリスク）**
+
+OpenAI / Search / Storage / SWA すべてに  
+ログを Log Analytics に送る設定がありません。
+
+これはセキュリティ事故の調査やトラブルシュートに必須です。
+
+---
+
+# 🧱 アーキテクチャ観点の指摘
+
+## ① Static Web Apps の location が eastasia 固定
+```bicep
+location: 'eastasia'
+```
+
+SWA はグローバルサービスなので問題はありませんが、  
+**管理プレーンのリージョンは location パラメータに合わせる**方が自然です。
+
+例：
+```bicep
+location: location
+```
+
+---
+
+## ② OpenAI の deployment capacity が 10（高すぎる）
+```bicep
+capacity: 10
+```
+
+Free ではないので課金が発生します。
+
+RAG の PoC なら **1 で十分**です。
+
+---
+
+## ③ Search Service の SKU が free（制限に注意）
+
+Free SKU の制限：
+
+- インデックス 3 個まで
+- ドキュメント数 50MB
+- スループット低い
+
+PoC なら OK ですが、  
+本番を見据えるなら `basic` 以上が必要です。
+
+---
+
+# 🧹 コード品質・改善ポイント
+
+## ① dependsOn が一部不要
+Bicep は依存関係を自動推論するため、  
+以下は不要です：
+
+```bicep
+dependsOn: [ gpt4oMini ]
+```
+
+---
+
+## ② uniqueSuffix の長さは 6 で十分だが、Storage は 24 文字制限に注意
+
+現在の命名は問題ありませんが、  
+prefix が長くなると Storage 名が 24 文字を超える可能性があります。
+
+---
+
+## ③ SWA の appsettings に “endpoint” を入れるのは OK だが、URL の末尾スラッシュに注意
+
+```bicep
+OPENAI_ENDPOINT: openaiService.properties.endpoint
+```
+
+Azure OpenAI の endpoint は通常：
+
+```
+https://xxxx.openai.azure.com/
+```
+
+末尾 `/` があるため、フロントで結合すると：
+
+```
+https://xxxx.openai.azure.com//openai/deployments/...
+```
+
+となる可能性があります。
